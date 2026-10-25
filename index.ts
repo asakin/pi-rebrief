@@ -122,17 +122,13 @@ export function createRebriefExtension(deps: RebriefDeps = {}) {
           return;
         }
 
-        const baseOptions = ctx.getSystemPromptOptions?.();
         const previousFiles =
           rebriefed?.cwd === ctx.cwd
             ? rebriefed.files
-            : (baseOptions?.contextFiles ?? []);
+            : (ctx.getSystemPromptOptions?.().contextFiles ?? []);
         const changed = !sameContextFiles(previousFiles, freshFiles);
 
         rebriefed = { cwd: ctx.cwd, files: cloneContextFiles(freshFiles) };
-        if (baseOptions) {
-          baseOptions.contextFiles = cloneContextFiles(freshFiles);
-        }
 
         if (!ctx.hasUI) return;
 

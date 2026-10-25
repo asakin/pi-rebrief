@@ -30,7 +30,7 @@ Edit a context file, then run:
 /rebrief
 ```
 
-The next turn sees the new instructions, and so does every turn after it. `/rebrief` reports
+Your next message runs with the new instructions, and so does everything after it. `/rebrief` reports
 what it found, for example:
 
 - `Reloaded context files: changed AGENTS.md, added sub/AGENTS.md.`
