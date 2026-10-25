@@ -1,0 +1,46 @@
+{
+  "name": "pi-rebrief",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Re-read project context files (AGENTS.md, CLAUDE.md) into a running Pi session without restarting.",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "pi-coding-agent",
+    "pi",
+    "agents-md",
+    "claude-md"
+  ],
+  "license": "MIT",
+  "author": "Ariel Sakin <asakin@gmail.com>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/asakin/pi-rebrief.git"
+  },
+  "homepage": "https://github.com/asakin/pi-rebrief#readme",
+  "bugs": {
+    "url": "https://github.com/asakin/pi-rebrief/issues"
+  },
+  "files": [
+    "index.ts",
+    "README.md",
+    "LICENSE"
+  ],
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "scripts": {
+    "check": "tsc --noEmit",
+    "test": "node --test"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "^1.0.0",
+    "@types/node": ">=22.0.0",
+    "typescript": ">=5.0.0"
+  }
+}

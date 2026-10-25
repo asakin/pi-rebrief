@@ -1,0 +1,38 @@
+name: Publish
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: npm-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 26
+          cache: npm
+          registry-url: https://registry.npmjs.org
+      - run: |
+          want="v$(npm pkg get version | tr -d '"')"
+          [ "$want" = "$GITHUB_REF_NAME" ] || { echo "tag $GITHUB_REF_NAME != package version $want"; exit 1; }
+      - run: npm ci --ignore-scripts
+      - run: npm run check
+      - run: npm test
+      - run: |
+          name="$(npm pkg get name | tr -d '"')"
+          version="$(npm pkg get version | tr -d '"')"
+          if npm view "$name@$version" version >/dev/null 2>&1; then
+            echo "skip $name@$version (already on the registry)"
+          else
+            npm publish
+          fi
