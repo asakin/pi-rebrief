@@ -12,6 +12,12 @@ export interface ContextFile {
 export interface RebriefDeps {
   getAgentDir?: () => string;
   loadProjectContextFiles?: (options: { cwd: string; agentDir: string }) => ContextFile[];
+  contextFilesDisabled?: () => boolean;
+}
+
+// Check if Pi was started with --no-context-files (-nc); extensions can't read built-in flags
+export function contextFilesDisabledByArgv(argv: readonly string[]): boolean {
+  return argv.includes("--no-context-files") || argv.includes("-nc");
 }
 
 // Check if two sets of context files are the same
@@ -52,6 +58,7 @@ function cloneContextFiles(files: readonly ContextFile[]): ContextFile[] {
 export function createRebriefExtension(deps: RebriefDeps = {}) {
   const resolveAgentDir = deps.getAgentDir ?? getAgentDir;
   const loadContextFiles = deps.loadProjectContextFiles ?? loadProjectContextFiles;
+  const contextFilesDisabled = deps.contextFilesDisabled ?? (() => contextFilesDisabledByArgv(process.argv));
 
   return function piRebrief(pi: ExtensionAPI) {
     let rebriefed: { cwd: string; files: ContextFile[] } | undefined;
@@ -63,6 +70,13 @@ export function createRebriefExtension(deps: RebriefDeps = {}) {
     pi.registerCommand("rebrief", {
       description: "Re-read project context files (AGENTS.md, CLAUDE.md, etc.) into the system prompt",
       handler: async (_args: string, ctx: ExtensionCommandContext) => {
+        if (contextFilesDisabled()) {
+          if (ctx.hasUI) {
+            ctx.ui.notify("Context files are disabled (--no-context-files) — nothing to rebrief.", "warning");
+          }
+          return;
+        }
+
         let freshFiles: ContextFile[];
         try {
           freshFiles = loadContextFiles({

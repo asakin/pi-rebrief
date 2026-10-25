@@ -7,9 +7,19 @@ import type {
   ExtensionCommandContext,
   ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
-import { createRebriefExtension, formatTokens, type ContextFile } from "./index.ts";
+import {
+  contextFilesDisabledByArgv,
+  createRebriefExtension,
+  formatTokens,
+  type ContextFile,
+  type RebriefDeps,
+} from "./index.ts";
 
-function setup(initialFiles: ContextFile[], diskFilesRef: { current: ContextFile[] }) {
+function setup(
+  initialFiles: ContextFile[],
+  diskFilesRef: { current: ContextFile[] },
+  deps: RebriefDeps = {},
+) {
   let commandHandler!: (args: string, ctx: ExtensionCommandContext) => Promise<void>;
   const eventHandlers = new Map<string, Array<(event: any, ctx: ExtensionContext) => any>>();
 
@@ -31,6 +41,8 @@ function setup(initialFiles: ContextFile[], diskFilesRef: { current: ContextFile
       assert.equal(cwd, "/repo");
       return diskFilesRef.current.map((f) => ({ ...f }));
     },
+    contextFilesDisabled: () => false,
+    ...deps,
   });
   ext(pi);
 
@@ -179,6 +191,24 @@ test("rebrief surfaces loader errors via ui.notify without overwriting state", a
   assert.equal(h.notifications[0]?.level, "error");
   assert.match(h.notifications[0]!.message, /Failed to reload context files: EACCES: permission denied/);
   assert.deepEqual(await h.runTurn(), [{ path: "/repo/AGENTS.md", content: "v1" }]);
+});
+
+test("rebrief does nothing when Pi was started with --no-context-files", async () => {
+  const disk = { current: [{ path: "/repo/AGENTS.md", content: "v1" }] };
+  const h = setup([], disk, { contextFilesDisabled: () => true });
+
+  await h.rebrief();
+  assert.equal(h.notifications.length, 1);
+  assert.equal(h.notifications[0]?.level, "warning");
+  assert.match(h.notifications[0]!.message, /--no-context-files/);
+  assert.deepEqual(h.baseOptions.contextFiles, []);
+  assert.deepEqual(await h.runTurn(), []);
+});
+
+test("contextFilesDisabledByArgv detects both flag spellings", () => {
+  assert.equal(contextFilesDisabledByArgv(["node", "pi", "--no-context-files"]), true);
+  assert.equal(contextFilesDisabledByArgv(["node", "pi", "-nc"]), true);
+  assert.equal(contextFilesDisabledByArgv(["node", "pi", "-c"]), false);
 });
 
 test("formatTokens formats token counts readably", () => {
