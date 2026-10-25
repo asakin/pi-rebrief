@@ -2,14 +2,17 @@
   "name": "pi-rebrief",
   "version": "0.1.0",
   "type": "module",
-  "description": "Re-read project context files (AGENTS.md, CLAUDE.md) into a running Pi session without restarting.",
+  "description": "Reload only the project context files, including AGENTS.md and CLAUDE.md, into a running Pi session: no extension restart or MCP reconnect like /reload, plus a report of what changed.",
   "keywords": [
     "pi-package",
     "pi-extension",
     "pi-coding-agent",
     "pi",
     "agents-md",
-    "claude-md"
+    "claude-md",
+    "context-files",
+    "reload",
+    "system-prompt"
   ],
   "license": "MIT",
   "author": "Ariel Sakin <asakin@gmail.com>",

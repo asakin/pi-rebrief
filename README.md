@@ -1,8 +1,12 @@
 # pi-rebrief
 
-Adds a `/rebrief` command to [Pi](https://pi.dev) that re-reads your project context
-files (`AGENTS.md`, `CLAUDE.md`, …) from disk mid-session so edits reach the agent
-without restarting.
+A [Pi](https://pi.dev) extension that adds a `/rebrief` command. It reloads only the
+project context files, including `AGENTS.md` and `CLAUDE.md`, into a running session, and
+tells you which files changed. It loads them with the same function Pi uses, so it picks up
+whatever files your Pi version discovers.
+
+Pi's own `/reload` also re-reads context files, but along with everything else: settings,
+extensions, MCP servers, skills and themes. `/rebrief` leaves all of that running.
 
 ## Install
 
@@ -18,20 +22,19 @@ pi -e npm:pi-rebrief
 
 ## Usage
 
-Edit your `AGENTS.md` or `CLAUDE.md`, then run:
+Edit a context file, then run:
 
 ```
 /rebrief
 ```
 
-`pi-rebrief` reloads the context files from disk immediately, updates the session's
-system-prompt context options for the rest of the session, and reports the prompt-cache
-impact:
+The next turn sees the new instructions, and so does every turn after it. `/rebrief` reports
+what it found, for example:
 
-- **When files changed mid-session:** warns how many cached context tokens will be
-  invalidated on the next turn (for example, `Reloaded 2 context files. Next turn will invalidate ~48.3k tokens of cached context.`).
-- **When nothing changed on disk:** confirms that the context files are unchanged and the
-  prompt cache is unaffected.
+- `Reloaded context files: changed AGENTS.md, added sub/AGENTS.md.`
+- `Context files unchanged (2 context files).`
+
+If Pi was started with `--no-context-files`, `/rebrief` does nothing.
 
 Pair it with `/tree` to rewind a couple of turns, tighten an instruction in `AGENTS.md`,
 run `/rebrief`, and continue from before the derail.
