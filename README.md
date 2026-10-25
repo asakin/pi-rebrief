@@ -1,16 +1,17 @@
 # pi-rebrief
 
-[![Known Vulnerabilities](https://snyk.io/test/github/asakin/pi-rebrief/badge.svg)](https://snyk.io/test/github/asakin/pi-rebrief)
+![npm](https://img.shields.io/npm/v/pi-rebrief) ![CI](https://github.com/asakin/pi-rebrief/actions/workflows/ci.yml/badge.svg) ![license](https://img.shields.io/npm/l/pi-rebrief) ![Known Vulnerabilities](https://snyk.io/test/github/asakin/pi-rebrief/badge.svg)
 
-A [Pi](https://pi.dev) extension that adds a `/rebrief` command. It reloads only the
-project context files, including `AGENTS.md` and `CLAUDE.md`, into a running session, and
-tells you which files changed. It also warns you in the status bar when those files change
-on disk, for example after a `git pull` or a branch switch. It loads them with the same
-function Pi uses, so it picks up whatever files your Pi version discovers.
+A [Pi](https://pi.dev) extension that adds a `/rebrief` command. It reloads the project
+context files, including `AGENTS.md` and `CLAUDE.md`, into the running session and tells you
+which files have changed.
 
-Pi's own `/reload` also re-reads context files, but along with everything else: settings,
-extensions, MCP servers, skills and themes, and it refuses to run while the agent is working.
-`/rebrief` leaves all of that running, and works mid-run.
+It also flags in the status bar when those files change on disk, for example after a `git pull`
+or a branch switch.
+
+Think of it as a lighter companion to Pi's `/reload`: `/reload` refreshes the whole session
+(settings, extensions, MCP servers, skills, themes and context files), while `/rebrief`
+refreshes only the context files, so it's safe to run while the agent is working.
 
 ## Install
 
@@ -18,11 +19,7 @@ extensions, MCP servers, skills and themes, and it refuses to run while the agen
 pi install npm:pi-rebrief
 ```
 
-Then run `/reload` in an active session, or try it for a single session without installing:
-
-```bash
-pi -e npm:pi-rebrief
-```
+Restart or `/reload` your session to use.
 
 ## Usage
 
@@ -39,16 +36,16 @@ what it found, for example:
 - `Reloaded context files: changed AGENTS.md, added sub/AGENTS.md.`
 - `Context files unchanged (2 context files).`
 
-Run it while the agent is working and the change applies to the running turn: the agent's
-next model request already has the new instructions
-(`Reloaded context files: changed AGENTS.md — applies to the running turn.`). An extension
-that replaces the whole system prompt for a run blocks this; the change then applies at your
-next message.
+If you run it while a turn is in progress, the rest of that turn will use the new
+instructions.
 
-If Pi was started with `--no-context-files`, `/rebrief` does nothing and nothing is watched.
+## Examples
 
-Pair it with `/tree` to rewind a couple of turns, tighten an instruction in `AGENTS.md`,
-run `/rebrief`, and continue from before the derail.
+- Pair it with `/tree` to retry an earlier prompt under new instructions.
+- The agent derails. Rewind with `/tree` to the turn before it did, tighten the instruction
+it missed in `AGENTS.md`, run `/rebrief`, and continue from there.
+- You `git pull` mid-task and a teammate's commit changed `AGENTS.md`. The status bar flags
+it; run `/rebrief` and keep going in the same session.
 
 ## License
 

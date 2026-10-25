@@ -26,6 +26,7 @@
   },
   "files": [
     "index.ts",
+    "format.ts",
     "README.md",
     "LICENSE"
   ],

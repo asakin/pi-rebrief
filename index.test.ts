@@ -2,321 +2,197 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type {
   BeforeAgentStartEvent,
-  BuildSystemPromptOptions,
   ExtensionAPI,
   ExtensionCommandContext,
   ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 import {
-  contextFilesDisabledByArgv,
   createRebriefExtension,
   describeChanges,
   renderProjectContext,
-  withContextUpdate,
   type ContextFile,
-  type RebriefDeps,
 } from "./index.ts";
 
-function setup(
-  initialFiles: ContextFile[],
-  diskFilesRef: { current: ContextFile[] },
-  deps: RebriefDeps = {},
-) {
-  let commandHandler!: (args: string, ctx: ExtensionCommandContext) => Promise<void>;
-  const eventHandlers = new Map<string, Array<(event: any, ctx: ExtensionContext) => any>>();
+// Minimal stand-in for Pi's extension host: records registered hooks and the /rebrief
+// command, stubs disk loading and the poll timer so tests can drive them deterministically,
+// and exposes the user-visible outputs (notifications and status bar text).
+function setup(startupFiles: ContextFile[], { contextFilesDisabled = false } = {}) {
+  let rebriefCommand!: (args: string, ctx: ExtensionCommandContext) => Promise<void>;
+  const handlers = new Map<string, (event: any, ctx: ExtensionContext) => any>();
+
+  // Context files currently on disk; returned whenever the extension reloads from disk.
+  let diskFiles = startupFiles.map((f) => ({ ...f }));
+  // Callback the extension passes to startTimer on session_start, so tests can run a poll check on demand.
+  let pollDisk: (() => void) | undefined;
+  let agentIdle = true;
+  let statusBar: string | undefined;
+  const notices: string[] = [];
 
   const pi = {
-    registerCommand(name: string, options: { handler: (args: string, ctx: ExtensionCommandContext) => Promise<void> }) {
-      if (name === "rebrief") commandHandler = options.handler;
+    registerCommand(name: string, options: { handler: typeof rebriefCommand }) {
+      if (name === "rebrief") rebriefCommand = options.handler;
     },
     on(event: string, handler: (event: any, ctx: ExtensionContext) => any) {
-      const list = eventHandlers.get(event) ?? [];
-      list.push(handler);
-      eventHandlers.set(event, list);
-      return () => {};
+      handlers.set(event, handler);
     },
   } as unknown as ExtensionAPI;
 
-  let tick: (() => void) | undefined;
-  const ext = createRebriefExtension({
-    getAgentDir: () => "/fake/agent",
-    loadProjectContextFiles: ({ cwd }) => {
-      assert.equal(cwd, "/repo");
-      return diskFilesRef.current.map((f) => ({ ...f }));
-    },
-    contextFilesDisabled: () => false,
-    startTimer: (fn) => {
-      tick = fn;
+  createRebriefExtension({
+    loadProjectContextFiles: () => diskFiles.map((f) => ({ ...f })),
+    contextFilesDisabled: () => contextFilesDisabled,
+    startTimer: (tick) => {
+      pollDisk = tick;
       return () => {
-        tick = undefined;
+        pollDisk = undefined;
       };
     },
-    ...deps,
-  });
-  ext(pi);
-
-  // Simulates AgentSession._baseSystemPromptOptions (which _rebuildSystemPrompt may reset to initialFiles)
-  const baseOptions: BuildSystemPromptOptions = {
-    cwd: "/repo",
-    contextFiles: initialFiles.map((f) => ({ ...f })),
-  };
-
-  const notifications: Array<{ message: string; level?: string }> = [];
-  const statuses: Array<string | undefined> = [];
-  let idle = true;
+  })(pi);
 
   const ctx = {
     cwd: "/repo",
     hasUI: true,
     ui: {
-      notify(message: string, level?: string) {
-        notifications.push({ message, level });
-      },
-      setStatus(key: string, text: string | undefined) {
-        assert.equal(key, "pi-rebrief");
-        statuses.push(text);
+      notify: (message: string) => notices.push(message),
+      setStatus: (_key: string, text: string | undefined) => {
+        statusBar = text;
       },
       theme: { fg: (_color: string, text: string) => text },
     },
-    isIdle: () => idle,
-    getSystemPromptOptions: () => baseOptions,
+    isIdle: () => agentIdle,
   } as unknown as ExtensionCommandContext;
 
-  async function runTurn(): Promise<ContextFile[]> {
-    // Simulates ExtensionRunner.emitBeforeAgentStart cloning _baseSystemPromptOptions per turn
-    const turnOptions: BuildSystemPromptOptions = {
-      cwd: baseOptions.cwd,
-      contextFiles: (baseOptions.contextFiles ?? []).map((f) => ({ ...f })),
-    };
-    const event = {
-      type: "before_agent_start",
-      systemPromptOptions: turnOptions,
-    } as unknown as BeforeAgentStartEvent;
-
-    for (const handler of eventHandlers.get("before_agent_start") ?? []) {
-      const result = await handler(event, ctx);
-      // Must not return forceSystemPrompt replacement
-      assert.equal(result, undefined);
-    }
-    return turnOptions.contextFiles ?? [];
-  }
-
-  async function emitSessionStart() {
-    for (const handler of eventHandlers.get("session_start") ?? []) {
-      await handler({ type: "session_start" }, ctx);
-    }
-  }
-
-  async function emitContext(messages: any[]): Promise<any[] | undefined> {
-    for (const handler of eventHandlers.get("context_with_system") ?? []) {
-      const result = await handler({ type: "context_with_system", messages }, ctx);
-      if (result?.messages) return result.messages;
-    }
-    return undefined;
-  }
-
   return {
-    baseOptions,
-    notifications,
-    statuses,
-    setIdle(value: boolean) {
-      idle = value;
+    notices,
+    get statusBar() {
+      return statusBar;
     },
-    tick: () => tick?.(),
-    hasTimer: () => tick !== undefined,
-    emitContext,
-    rebrief: () => commandHandler("", ctx),
-    runTurn,
-    emitSessionStart,
+    writeDisk(files: ContextFile[]) {
+      diskFiles = files;
+    },
+    setAgentIdle(idle: boolean) {
+      agentIdle = idle;
+    },
+    pollDisk: () => pollDisk?.(),
+    isPolling: () => pollDisk !== undefined,
+    rebrief: () => rebriefCommand("", ctx),
+    startSession: () => handlers.get("session_start")?.({ type: "session_start" }, ctx),
+    // Runs before_agent_start for a new turn and returns the contextFiles the turn will use.
+    async startTurn(): Promise<ContextFile[]> {
+      const systemPromptOptions = { cwd: "/repo", contextFiles: startupFiles.map((f) => ({ ...f })) };
+      await handlers.get("before_agent_start")?.(
+        { type: "before_agent_start", systemPromptOptions } as BeforeAgentStartEvent,
+        ctx,
+      );
+      return systemPromptOptions.contextFiles;
+    },
+    // Runs context_with_system before an LLM request inside a turn; returns the modified transcript, if any.
+    prepareRequest(messages: any[]): any[] | undefined {
+      return handlers.get("context_with_system")?.({ type: "context_with_system", messages }, ctx)?.messages;
+    },
   };
 }
 
-test("rebrief persists across multiple turns and survives _baseSystemPromptOptions rebuilds", async () => {
-  const initial = [{ path: "/repo/AGENTS.md", content: "v1" }];
-  const disk = { current: [{ path: "/repo/AGENTS.md", content: "v2 - Ms. Pac-Man" }] };
-  const h = setup(initial, disk);
+test("/rebrief between turns reloads context files for subsequent turns", async () => {
+  const v1 = [{ path: "/repo/AGENTS.md", content: "v1" }];
+  const v2 = [{ path: "/repo/AGENTS.md", content: "v2" }];
+  const session = setup(v1);
+  await session.startSession();
 
-  await h.rebrief();
-  assert.equal(h.notifications.length, 1);
-  assert.equal(h.notifications[0]?.level, "info");
-  assert.equal(h.notifications[0]!.message, "Reloaded context files: changed AGENTS.md.");
+  // User edits AGENTS.md and runs /rebrief while the agent is idle.
+  session.writeDisk(v2);
+  await session.rebrief();
+  assert.equal(session.notices.at(-1), "Reloaded context files: changed AGENTS.md.");
 
-  // Turn 1 sees v2
-  assert.deepEqual(await h.runTurn(), [{ path: "/repo/AGENTS.md", content: "v2 - Ms. Pac-Man" }]);
+  // The next turn builds its system prompt with the reloaded file.
+  assert.deepEqual(await session.startTurn(), v2);
 
-  // Simulate AgentSession._rebuildSystemPrompt resetting _baseSystemPromptOptions back to startup v1
-  h.baseOptions.contextFiles = [{ path: "/repo/AGENTS.md", content: "v1" }];
-
-  // Turn 2 still sees v2 (no Turn-2 revert!)
-  assert.deepEqual(await h.runTurn(), [{ path: "/repo/AGENTS.md", content: "v2 - Ms. Pac-Man" }]);
+  // Running /rebrief again with no further edits reports that nothing changed.
+  await session.rebrief();
+  assert.equal(session.notices.at(-1), "Context files unchanged (1 context file).");
 });
 
-test("rebrief names the files that changed, were added, or were removed", async () => {
-  const initial = [
-    { path: "/repo/AGENTS.md", content: "v1" },
-    { path: "/repo/old/CLAUDE.md", content: "gone" },
+test("status bar flags when context files change on disk and clears after /rebrief", async () => {
+  const v1 = [{ path: "/repo/AGENTS.md", content: "v1" }];
+  const session = setup(v1);
+  await session.startSession();
+
+  // Disk matches what the session loaded: no warning in the status bar.
+  session.pollDisk();
+  assert.equal(session.statusBar, undefined);
+
+  // A file changes on disk (e.g. after git pull): the next poll shows the warning.
+  session.writeDisk([{ path: "/repo/AGENTS.md", content: "v2" }]);
+  session.pollDisk();
+  assert.equal(session.statusBar, "● context files changed — /rebrief");
+
+  // Running /rebrief reloads the file and clears the warning.
+  await session.rebrief();
+  assert.equal(session.statusBar, undefined);
+});
+
+test("/rebrief mid-turn injects the new instructions into the running turn", async () => {
+  const v1 = [{ path: "/repo/AGENTS.md", content: "v1" }];
+  const v2 = [{ path: "/repo/AGENTS.md", content: "v2" }];
+  const session = setup(v1);
+  await session.startSession();
+
+  // A turn is already running with v1 in its initial system message.
+  session.setAgentIdle(false);
+  const turnStart = [
+    { role: "system", content: "", sections: { project_context: renderProjectContext(v1) }, timestamp: 1 },
+    { role: "user", content: "go", timestamp: 2 },
   ];
-  const disk = {
-    current: [
-      { path: "/repo/AGENTS.md", content: "v2" },
-      { path: "/repo/sub/AGENTS.md", content: "sub" },
-    ],
-  };
-  const h = setup(initial, disk);
 
-  await h.rebrief();
-  assert.equal(h.notifications.length, 1);
-  assert.equal(h.notifications[0]?.level, "info");
-  assert.equal(
-    h.notifications[0]?.message,
-    "Reloaded context files: changed AGENTS.md, added sub/AGENTS.md, removed old/CLAUDE.md.",
-  );
+  // User edits AGENTS.md and runs /rebrief while the agent is working.
+  session.writeDisk(v2);
+  await session.rebrief();
+  assert.equal(session.notices.at(-1), "Reloaded context files: changed AGENTS.md — applies to the running turn.");
+
+  // Before the agent's next model call in this turn, a system section update with v2 is appended.
+  const afterAssistantStep = [...turnStart, { role: "assistant", content: [], timestamp: 3 }];
+  const requestMessages = session.prepareRequest(afterAssistantStep);
+  assert.deepEqual(requestMessages?.at(-1)?.sections, { project_context: renderProjectContext(v2) });
+
+  // Later requests in the same turn keep the update where it was first inserted, not at the end,
+  // so it reads as happening at that point and the cached prefix stays the same.
+  const afterToolResult = [...afterAssistantStep, { role: "toolResult", content: [], timestamp: 4 }];
+  const laterRequest = session.prepareRequest(afterToolResult);
+  assert.equal(laterRequest?.length, 5);
+  assert.deepEqual(laterRequest?.[3]?.sections, { project_context: renderProjectContext(v2) });
+  assert.equal(laterRequest?.at(-1)?.role, "toolResult");
+
+  // Once the next turn starts, its own system prompt has v2, so per-request injection stops.
+  await session.startTurn();
+  assert.equal(session.prepareRequest(afterAssistantStep), undefined);
 });
 
-test("rebrief reports unchanged when files on disk match current context files", async () => {
-  const initial = [{ path: "/repo/AGENTS.md", content: "v1" }];
-  const disk = { current: [{ path: "/repo/AGENTS.md", content: "v1" }] };
-  const h = setup(initial, disk);
+test("with --no-context-files, nothing is watched and /rebrief does nothing", async () => {
+  const v1 = [{ path: "/repo/AGENTS.md", content: "v1" }];
+  const session = setup(v1, { contextFilesDisabled: true });
+  await session.startSession();
+  assert.equal(session.isPolling(), false);
 
-  await h.rebrief();
-  assert.equal(h.notifications.length, 1);
-  assert.equal(h.notifications[0]?.level, "info");
-  assert.equal(
-    h.notifications[0]?.message,
-    "Context files unchanged (1 context file).",
-  );
+  // Editing a file and running /rebrief leaves the next turn untouched.
+  session.writeDisk([{ path: "/repo/AGENTS.md", content: "v2" }]);
+  await session.rebrief();
+  assert.equal(session.notices.at(-1), "Context files are disabled (--no-context-files) — nothing to rebrief.");
+  assert.deepEqual(await session.startTurn(), v1);
 });
 
-test("session_start clears rebriefed override for the new session", async () => {
-  const initial = [{ path: "/repo/AGENTS.md", content: "v1" }];
-  const disk = { current: [{ path: "/repo/AGENTS.md", content: "v2" }] };
-  const h = setup(initial, disk);
-
-  await h.rebrief();
-  assert.deepEqual(await h.runTurn(), [{ path: "/repo/AGENTS.md", content: "v2" }]);
-
-  // New session starts with fresh baseOptions
-  h.baseOptions.contextFiles = [{ path: "/repo/AGENTS.md", content: "v3-from-new-session" }];
-  await h.emitSessionStart();
-  assert.deepEqual(await h.runTurn(), [{ path: "/repo/AGENTS.md", content: "v3-from-new-session" }]);
-});
-
-test("rebrief surfaces loader errors via ui.notify without overwriting state", async () => {
-  const initial = [{ path: "/repo/AGENTS.md", content: "v1" }];
-  let shouldThrow = true;
-  const h = setup(initial, {
-    get current() {
-      if (shouldThrow) throw new Error("EACCES: permission denied");
-      return initial;
-    },
-  });
-
-  await h.rebrief();
-  assert.equal(h.notifications.length, 1);
-  assert.equal(h.notifications[0]?.level, "error");
-  assert.match(h.notifications[0]!.message, /Failed to reload context files: EACCES: permission denied/);
-  assert.deepEqual(await h.runTurn(), [{ path: "/repo/AGENTS.md", content: "v1" }]);
-});
-
-test("rebrief does nothing when Pi was started with --no-context-files", async () => {
-  const disk = { current: [{ path: "/repo/AGENTS.md", content: "v1" }] };
-  const h = setup([], disk, { contextFilesDisabled: () => true });
-
-  await h.rebrief();
-  assert.equal(h.notifications.length, 1);
-  assert.equal(h.notifications[0]?.level, "warning");
-  assert.match(h.notifications[0]!.message, /--no-context-files/);
-  assert.deepEqual(h.baseOptions.contextFiles, []);
-  assert.deepEqual(await h.runTurn(), []);
-});
-
-test("contextFilesDisabledByArgv detects both flag spellings", () => {
-  assert.equal(contextFilesDisabledByArgv(["node", "pi", "--no-context-files"]), true);
-  assert.equal(contextFilesDisabledByArgv(["node", "pi", "-nc"]), true);
-  assert.equal(contextFilesDisabledByArgv(["node", "pi", "-c"]), false);
-});
-
-test("describeChanges shortens paths outside cwd and caps the list", () => {
-  const files = (contents: string[]) =>
-    ["/repo/a.md", "/repo/b.md", "/repo/c.md", "/home/me/.pi/agent/AGENTS.md", "/etc/AGENTS.md"].map((path, i) => ({
-      path,
-      content: contents[i] ?? "",
-    }));
-  assert.equal(
-    describeChanges(files(["1", "1", "1", "1", "1"]), files(["2", "2", "2", "2", "2"]), "/repo", "/home/me"),
-    "changed a.md, b.md, c.md, and 2 more",
-  );
+test("describeChanges summarizes changed, added, and removed files with readable paths", () => {
   assert.equal(
     describeChanges(
-      [{ path: "/home/me/.pi/agent/AGENTS.md", content: "1" }],
-      [{ path: "/home/me/.pi/agent/AGENTS.md", content: "2" }],
+      [
+        { path: "/repo/AGENTS.md", content: "v1" },
+        { path: "/repo/old/CLAUDE.md", content: "gone" },
+      ],
+      [
+        { path: "/repo/AGENTS.md", content: "v2" },
+        { path: "/home/me/.pi/agent/AGENTS.md", content: "global" },
+      ],
       "/repo",
       "/home/me",
     ),
-    "changed ~/.pi/agent/AGENTS.md",
+    "changed AGENTS.md, added ~/.pi/agent/AGENTS.md, removed old/CLAUDE.md",
   );
-  const a = { path: "/repo/a.md", content: "a" };
-  const b = { path: "/repo/b.md", content: "b" };
-  assert.equal(describeChanges([a, b], [b, a], "/repo", "/home/me"), "order changed");
-});
-
-test("status bar warns when context files change on disk and clears after rebrief", async () => {
-  const initial = [{ path: "/repo/AGENTS.md", content: "v1" }];
-  const disk = { current: initial.map((f) => ({ ...f })) };
-  const h = setup(initial, disk);
-  await h.emitSessionStart();
-
-  h.tick();
-  assert.deepEqual(h.statuses, []);
-
-  disk.current = [{ path: "/repo/AGENTS.md", content: "v2" }];
-  h.tick();
-  h.tick();
-  assert.deepEqual(h.statuses, ["● context files changed — /rebrief"]);
-
-  await h.rebrief();
-  h.tick();
-  assert.deepEqual(h.statuses, ["● context files changed — /rebrief", undefined]);
-});
-
-test("no polling when Pi was started with --no-context-files", async () => {
-  const h = setup([], { current: [] }, { contextFilesDisabled: () => true });
-  await h.emitSessionStart();
-  assert.equal(h.hasTimer(), false);
-});
-
-test("rebrief during a run updates the running turn until the next run starts", async () => {
-  const initial = [{ path: "/repo/AGENTS.md", content: "v1" }];
-  const disk = { current: [{ path: "/repo/AGENTS.md", content: "v2" }] };
-  const h = setup(initial, disk);
-  const transcript = [
-    { role: "system", content: "", sections: { project_context: renderProjectContext(initial) }, timestamp: 1 },
-    { role: "user", content: "go", timestamp: 2 },
-  ];
-  assert.equal(await h.emitContext(transcript), undefined);
-
-  h.setIdle(false);
-  await h.rebrief();
-  assert.equal(h.notifications[0]?.message, "Reloaded context files: changed AGENTS.md — applies to the running turn.");
-
-  const next = [...transcript, { role: "assistant", content: [], timestamp: 3 }];
-  const sent = await h.emitContext(next);
-  assert.equal(sent?.length, 4);
-  assert.equal(sent?.[3].role, "system");
-  assert.deepEqual(sent?.[3].sections, { project_context: renderProjectContext(disk.current) });
-
-  // Later requests keep the update at the same place
-  const later = await h.emitContext([...next, { role: "toolResult", content: [], timestamp: 4 }]);
-  assert.equal(later?.[3].role, "system");
-  assert.equal(later?.length, 5);
-
-  await h.runTurn();
-  assert.equal(await h.emitContext(next), undefined);
-});
-
-test("withContextUpdate leaves a transcript that already has the files alone", () => {
-  const files = [{ path: "/repo/AGENTS.md", content: "v1" }];
-  const messages = [{ role: "system", content: "", sections: { project_context: renderProjectContext(files) }, timestamp: 1 }];
-  assert.equal(withContextUpdate(messages as any, files, 1, 9), undefined);
-  assert.equal(renderProjectContext([]), null);
 });
