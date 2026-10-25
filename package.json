@@ -1,6 +1,6 @@
 {
   "name": "pi-rebrief",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "type": "module",
   "description": "Reload the project context files, including AGENTS.md and CLAUDE.md, into a running Pi session, even mid-turn, and see in the status bar when they change on disk.",
   "keywords": [
