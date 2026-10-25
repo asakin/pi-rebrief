@@ -3,6 +3,8 @@ import type {
   ExtensionCommandContext,
 } from "@earendil-works/pi-coding-agent";
 import { getAgentDir, loadProjectContextFiles } from "@earendil-works/pi-coding-agent";
+import { homedir } from "node:os";
+import { isAbsolute, relative, sep } from "node:path";
 
 export interface ContextFile {
   path: string;
@@ -31,17 +33,46 @@ export function sameContextFiles(a: readonly ContextFile[], b: readonly ContextF
   return true;
 }
 
-// Format the number of tokens into a human-readable string
-export function formatTokens(tokens: number): string {
-  if (tokens >= 1_000_000) {
-    const m = tokens / 1_000_000;
-    return `${m >= 10 ? Math.round(m) : Number(m.toFixed(1))}M tokens`;
+// Show a path relative to cwd when inside it, else home-relative, else absolute
+function displayPath(path: string, cwd: string, home: string): string {
+  const rel = relative(cwd, path);
+  if (rel && !rel.startsWith("..") && !isAbsolute(rel)) return rel;
+  if (home && path.startsWith(home + sep)) return `~${path.slice(home.length)}`;
+  return path;
+}
+
+const MAX_LISTED = 3;
+
+// Summarize which context files changed, were added, or were removed
+export function describeChanges(
+  previous: readonly ContextFile[],
+  fresh: readonly ContextFile[],
+  cwd: string,
+  home: string = homedir(),
+): string {
+  const before = new Map(previous.map((file) => [file.path, file.content]));
+  const after = new Set(fresh.map((file) => file.path));
+  const entries: string[] = [];
+  for (const file of fresh) {
+    const old = before.get(file.path);
+    if (old === undefined) entries.push(`added ${displayPath(file.path, cwd, home)}`);
+    else if (old !== file.content) entries.push(`changed ${displayPath(file.path, cwd, home)}`);
   }
-  if (tokens >= 1_000) {
-    const k = tokens / 1_000;
-    return `${k >= 100 ? Math.round(k) : Number(k.toFixed(1))}k tokens`;
+  for (const file of previous) {
+    if (!after.has(file.path)) entries.push(`removed ${displayPath(file.path, cwd, home)}`);
   }
-  return `${tokens} token${tokens === 1 ? "" : "s"}`;
+  if (entries.length === 0) return "order changed";
+
+  // "changed a, b" instead of "changed a, changed b"
+  const merged: string[] = [];
+  let lastVerb = "";
+  for (const entry of entries.slice(0, MAX_LISTED)) {
+    const [verb] = entry.split(" ", 1);
+    merged.push(verb === lastVerb ? entry.slice(verb!.length + 1) : entry);
+    lastVerb = verb!;
+  }
+  const more = entries.length - MAX_LISTED;
+  return more > 0 ? `${merged.join(", ")}, and ${more} more` : merged.join(", ");
 }
 
 // Format the number of context files into a human-readable string
@@ -68,7 +99,7 @@ export function createRebriefExtension(deps: RebriefDeps = {}) {
     });
 
     pi.registerCommand("rebrief", {
-      description: "Re-read project context files (AGENTS.md, CLAUDE.md, etc.) into the system prompt",
+      description: "Reload only context files (lighter than /reload)",
       handler: async (_args: string, ctx: ExtensionCommandContext) => {
         if (contextFilesDisabled()) {
           if (ctx.hasUI) {
@@ -106,23 +137,11 @@ export function createRebriefExtension(deps: RebriefDeps = {}) {
         if (!ctx.hasUI) return;
 
         if (!changed) {
-          ctx.ui.notify(
-            `Context files unchanged (${fileCountLabel(freshFiles.length)}) — prompt cache unaffected.`,
-            "info",
-          );
+          ctx.ui.notify(`Context files unchanged (${fileCountLabel(freshFiles.length)}).`, "info");
           return;
         }
 
-        const tokens = ctx.getContextUsage?.()?.tokens;
-        if (typeof tokens === "number" && Number.isFinite(tokens) && tokens > 0) {
-          ctx.ui.notify(
-            `Reloaded ${fileCountLabel(freshFiles.length)}. Next turn will invalidate ~${formatTokens(tokens)} of cached context.`,
-            "warning",
-          );
-          return;
-        }
-
-        ctx.ui.notify(`Reloaded ${fileCountLabel(freshFiles.length)} for the next turn.`, "info");
+        ctx.ui.notify(`Reloaded context files: ${describeChanges(previousFiles, freshFiles, ctx.cwd)}.`, "info");
       },
     });
 

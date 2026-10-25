@@ -10,7 +10,7 @@ import type {
 import {
   contextFilesDisabledByArgv,
   createRebriefExtension,
-  formatTokens,
+  describeChanges,
   type ContextFile,
   type RebriefDeps,
 } from "./index.ts";
@@ -53,7 +53,6 @@ function setup(
   };
 
   const notifications: Array<{ message: string; level?: string }> = [];
-  let contextTokens: number | null | undefined = undefined;
 
   const ctx = {
     cwd: "/repo",
@@ -64,10 +63,6 @@ function setup(
       },
     },
     getSystemPromptOptions: () => baseOptions,
-    getContextUsage: () =>
-      contextTokens === undefined
-        ? undefined
-        : { tokens: contextTokens, contextWindow: 200_000, percent: contextTokens ? (contextTokens / 200_000) * 100 : 0 },
   } as unknown as ExtensionCommandContext;
 
   async function runTurn(): Promise<ContextFile[]> {
@@ -98,9 +93,6 @@ function setup(
   return {
     baseOptions,
     notifications,
-    setContextTokens(tokens: number | null | undefined) {
-      contextTokens = tokens;
-    },
     rebrief: () => commandHandler("", ctx),
     runTurn,
     emitSessionStart,
@@ -115,7 +107,7 @@ test("rebrief persists across multiple turns and survives _baseSystemPromptOptio
   await h.rebrief();
   assert.equal(h.notifications.length, 1);
   assert.equal(h.notifications[0]?.level, "info");
-  assert.match(h.notifications[0]!.message, /Reloaded 1 context file for the next turn/);
+  assert.equal(h.notifications[0]!.message, "Reloaded context files: changed AGENTS.md.");
 
   // Turn 1 sees v2
   assert.deepEqual(await h.runTurn(), [{ path: "/repo/AGENTS.md", content: "v2 - Ms. Pac-Man" }]);
@@ -127,8 +119,11 @@ test("rebrief persists across multiple turns and survives _baseSystemPromptOptio
   assert.deepEqual(await h.runTurn(), [{ path: "/repo/AGENTS.md", content: "v2 - Ms. Pac-Man" }]);
 });
 
-test("rebrief warns with cached context token count when files change mid-session", async () => {
-  const initial = [{ path: "/repo/AGENTS.md", content: "v1" }];
+test("rebrief names the files that changed, were added, or were removed", async () => {
+  const initial = [
+    { path: "/repo/AGENTS.md", content: "v1" },
+    { path: "/repo/old/CLAUDE.md", content: "gone" },
+  ];
   const disk = {
     current: [
       { path: "/repo/AGENTS.md", content: "v2" },
@@ -136,14 +131,13 @@ test("rebrief warns with cached context token count when files change mid-sessio
     ],
   };
   const h = setup(initial, disk);
-  h.setContextTokens(48_320);
 
   await h.rebrief();
   assert.equal(h.notifications.length, 1);
-  assert.equal(h.notifications[0]?.level, "warning");
+  assert.equal(h.notifications[0]?.level, "info");
   assert.equal(
     h.notifications[0]?.message,
-    "Reloaded 2 context files. Next turn will invalidate ~48.3k tokens of cached context.",
+    "Reloaded context files: changed AGENTS.md, added sub/AGENTS.md, removed old/CLAUDE.md.",
   );
 });
 
@@ -151,14 +145,13 @@ test("rebrief reports unchanged when files on disk match current context files",
   const initial = [{ path: "/repo/AGENTS.md", content: "v1" }];
   const disk = { current: [{ path: "/repo/AGENTS.md", content: "v1" }] };
   const h = setup(initial, disk);
-  h.setContextTokens(65_000);
 
   await h.rebrief();
   assert.equal(h.notifications.length, 1);
   assert.equal(h.notifications[0]?.level, "info");
   assert.equal(
     h.notifications[0]?.message,
-    "Context files unchanged (1 context file) — prompt cache unaffected.",
+    "Context files unchanged (1 context file).",
   );
 });
 
@@ -211,11 +204,26 @@ test("contextFilesDisabledByArgv detects both flag spellings", () => {
   assert.equal(contextFilesDisabledByArgv(["node", "pi", "-c"]), false);
 });
 
-test("formatTokens formats token counts readably", () => {
-  assert.equal(formatTokens(1), "1 token");
-  assert.equal(formatTokens(850), "850 tokens");
-  assert.equal(formatTokens(1_250), "1.3k tokens");
-  assert.equal(formatTokens(48_000), "48k tokens");
-  assert.equal(formatTokens(125_400), "125k tokens");
-  assert.equal(formatTokens(1_500_000), "1.5M tokens");
+test("describeChanges shortens paths outside cwd and caps the list", () => {
+  const files = (contents: string[]) =>
+    ["/repo/a.md", "/repo/b.md", "/repo/c.md", "/home/me/.pi/agent/AGENTS.md", "/etc/AGENTS.md"].map((path, i) => ({
+      path,
+      content: contents[i] ?? "",
+    }));
+  assert.equal(
+    describeChanges(files(["1", "1", "1", "1", "1"]), files(["2", "2", "2", "2", "2"]), "/repo", "/home/me"),
+    "changed a.md, b.md, c.md, and 2 more",
+  );
+  assert.equal(
+    describeChanges(
+      [{ path: "/home/me/.pi/agent/AGENTS.md", content: "1" }],
+      [{ path: "/home/me/.pi/agent/AGENTS.md", content: "2" }],
+      "/repo",
+      "/home/me",
+    ),
+    "changed ~/.pi/agent/AGENTS.md",
+  );
+  const a = { path: "/repo/a.md", content: "a" };
+  const b = { path: "/repo/b.md", content: "b" };
+  assert.equal(describeChanges([a, b], [b, a], "/repo", "/home/me"), "order changed");
 });
