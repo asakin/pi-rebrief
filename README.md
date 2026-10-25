@@ -1,5 +1,7 @@
 # pi-rebrief
 
+[![Known Vulnerabilities](https://snyk.io/test/github/asakin/pi-rebrief/badge.svg)](https://snyk.io/test/github/asakin/pi-rebrief)
+
 A [Pi](https://pi.dev) extension that adds a `/rebrief` command. It reloads only the
 project context files, including `AGENTS.md` and `CLAUDE.md`, into a running session, and
 tells you which files changed. It loads them with the same function Pi uses, so it picks up
