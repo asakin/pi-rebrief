@@ -1,8 +1,11 @@
 import type {
+  ContextWithSystemEvent,
   ExtensionAPI,
   ExtensionCommandContext,
+  ExtensionUIContext,
 } from "@earendil-works/pi-coding-agent";
 import { getAgentDir, loadProjectContextFiles } from "@earendil-works/pi-coding-agent";
+import { getCurrentSystemMessage } from "@earendil-works/pi-ai";
 import { homedir } from "node:os";
 import { isAbsolute, relative, sep } from "node:path";
 
@@ -15,7 +18,13 @@ export interface RebriefDeps {
   getAgentDir?: () => string;
   loadProjectContextFiles?: (options: { cwd: string; agentDir: string }) => ContextFile[];
   contextFilesDisabled?: () => boolean;
+  startTimer?: (tick: () => void, ms: number) => () => void;
 }
+
+type Messages = ContextWithSystemEvent["messages"];
+
+const STATUS_KEY = "pi-rebrief";
+const POLL_MS = 3000;
 
 // Check if Pi was started with --no-context-files (-nc); extensions can't read built-in flags
 export function contextFilesDisabledByArgv(argv: readonly string[]): boolean {
@@ -85,17 +94,88 @@ function cloneContextFiles(files: readonly ContextFile[]): ContextFile[] {
   return files.map((file) => ({ path: file.path, content: file.content }));
 }
 
+// Render the project_context prompt section the way Pi does (Pi does not export its renderer)
+export function renderProjectContext(files: readonly ContextFile[]): string | null {
+  if (files.length === 0) return null;
+  const body = [
+    "Project-specific instructions and guidelines:",
+    ...files.map(({ path, content }) => `<project_instructions path="${path}">\n${content}\n</project_instructions>`),
+  ].join("\n\n");
+  return `<project_context>\n${body}\n</project_context>`;
+}
+
+// Add a request-local section update after the anchor message, unless the transcript already has these files
+export function withContextUpdate(
+  messages: Messages,
+  files: readonly ContextFile[],
+  anchorTimestamp: number | undefined,
+  timestamp: number,
+): Messages | undefined {
+  const desired = renderProjectContext(files);
+  const current = getCurrentSystemMessage(messages)?.sections?.project_context ?? null;
+  if (current === desired) return undefined;
+  const update = { role: "system" as const, content: "", sections: { project_context: desired }, timestamp };
+  const anchor = anchorTimestamp === undefined ? -1 : messages.findIndex((m) => m.timestamp === anchorTimestamp);
+  const at = anchor === -1 ? messages.length : anchor + 1;
+  return [...messages.slice(0, at), update, ...messages.slice(at)];
+}
+
+function startInterval(tick: () => void, ms: number): () => void {
+  const timer = setInterval(tick, ms);
+  timer.unref?.();
+  return () => clearInterval(timer);
+}
+
 // Create the rebrief extension
 export function createRebriefExtension(deps: RebriefDeps = {}) {
   const resolveAgentDir = deps.getAgentDir ?? getAgentDir;
   const loadContextFiles = deps.loadProjectContextFiles ?? loadProjectContextFiles;
   const contextFilesDisabled = deps.contextFilesDisabled ?? (() => contextFilesDisabledByArgv(process.argv));
+  const startTimer = deps.startTimer ?? startInterval;
 
   return function piRebrief(pi: ExtensionAPI) {
+    // Files /rebrief loaded, applied at every run start
     let rebriefed: { cwd: string; files: ContextFile[] } | undefined;
+    // What the session has loaded, compared against disk
+    let loaded: ContextFile[] | undefined;
+    // A /rebrief issued while a run was in progress; anchored after the newest message of the next request
+    let pending: { files: ContextFile[]; anchorTimestamp?: number; timestamp: number } | undefined;
+    let stopTimer: (() => void) | undefined;
+    let stale = false;
 
-    pi.on("session_start", () => {
+    const setStale = (ui: ExtensionUIContext | undefined, next: boolean) => {
+      if (next === stale || !ui) return;
+      stale = next;
+      ui.setStatus(STATUS_KEY, next ? `${ui.theme.fg("warning", "●")} context files changed — /rebrief` : undefined);
+    };
+
+    pi.on("session_start", (_event, ctx) => {
       rebriefed = undefined;
+      pending = undefined;
+      stale = false;
+      stopTimer?.();
+      stopTimer = undefined;
+      if (contextFilesDisabled()) return;
+      const ui = ctx.hasUI ? ctx.ui : undefined;
+      const load = () => loadContextFiles({ cwd: ctx.cwd, agentDir: resolveAgentDir() });
+      try {
+        loaded = load();
+      } catch {
+        loaded = undefined;
+      }
+      stopTimer = startTimer(() => {
+        if (!loaded) return;
+        try {
+          setStale(ui, !sameContextFiles(loaded, load()));
+        } catch {
+          // Unreadable for now; check again next tick
+        }
+      }, POLL_MS);
+    });
+
+    pi.on("session_shutdown", () => {
+      stopTimer?.();
+      stopTimer = undefined;
     });
 
     pi.registerCommand("rebrief", {
@@ -122,28 +202,42 @@ export function createRebriefExtension(deps: RebriefDeps = {}) {
           return;
         }
 
-        const previousFiles =
-          rebriefed?.cwd === ctx.cwd
-            ? rebriefed.files
-            : (ctx.getSystemPromptOptions?.().contextFiles ?? []);
+        const previousFiles = loaded ?? ctx.getSystemPromptOptions?.().contextFiles ?? [];
         const changed = !sameContextFiles(previousFiles, freshFiles);
+        const running = !ctx.isIdle();
 
         rebriefed = { cwd: ctx.cwd, files: cloneContextFiles(freshFiles) };
+        loaded = cloneContextFiles(freshFiles);
+        if (changed && running) {
+          pending = { files: cloneContextFiles(freshFiles), timestamp: Date.now() };
+        }
 
         if (!ctx.hasUI) return;
+        setStale(ctx.ui, false);
 
         if (!changed) {
           ctx.ui.notify(`Context files unchanged (${fileCountLabel(freshFiles.length)}).`, "info");
           return;
         }
 
-        ctx.ui.notify(`Reloaded context files: ${describeChanges(previousFiles, freshFiles, ctx.cwd)}.`, "info");
+        const when = running ? " — applies to the running turn" : "";
+        ctx.ui.notify(`Reloaded context files: ${describeChanges(previousFiles, freshFiles, ctx.cwd)}${when}.`, "info");
       },
     });
 
     pi.on("before_agent_start", async (event) => {
-      if (!rebriefed || rebriefed.cwd !== event.systemPromptOptions.cwd) return;
-      event.systemPromptOptions.contextFiles = cloneContextFiles(rebriefed.files);
+      pending = undefined;
+      if (rebriefed && rebriefed.cwd === event.systemPromptOptions.cwd) {
+        event.systemPromptOptions.contextFiles = cloneContextFiles(rebriefed.files);
+      }
+      loaded = cloneContextFiles(event.systemPromptOptions.contextFiles ?? []);
+    });
+
+    pi.on("context_with_system", (event) => {
+      if (!pending) return;
+      pending.anchorTimestamp ??= event.messages.at(-1)?.timestamp;
+      const messages = withContextUpdate(event.messages, pending.files, pending.anchorTimestamp, pending.timestamp);
+      return messages ? { messages } : undefined;
     });
   };
 }

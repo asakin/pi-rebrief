@@ -11,6 +11,8 @@ import {
   contextFilesDisabledByArgv,
   createRebriefExtension,
   describeChanges,
+  renderProjectContext,
+  withContextUpdate,
   type ContextFile,
   type RebriefDeps,
 } from "./index.ts";
@@ -35,6 +37,7 @@ function setup(
     },
   } as unknown as ExtensionAPI;
 
+  let tick: (() => void) | undefined;
   const ext = createRebriefExtension({
     getAgentDir: () => "/fake/agent",
     loadProjectContextFiles: ({ cwd }) => {
@@ -42,6 +45,12 @@ function setup(
       return diskFilesRef.current.map((f) => ({ ...f }));
     },
     contextFilesDisabled: () => false,
+    startTimer: (fn) => {
+      tick = fn;
+      return () => {
+        tick = undefined;
+      };
+    },
     ...deps,
   });
   ext(pi);
@@ -53,6 +62,8 @@ function setup(
   };
 
   const notifications: Array<{ message: string; level?: string }> = [];
+  const statuses: Array<string | undefined> = [];
+  let idle = true;
 
   const ctx = {
     cwd: "/repo",
@@ -61,7 +72,13 @@ function setup(
       notify(message: string, level?: string) {
         notifications.push({ message, level });
       },
+      setStatus(key: string, text: string | undefined) {
+        assert.equal(key, "pi-rebrief");
+        statuses.push(text);
+      },
+      theme: { fg: (_color: string, text: string) => text },
     },
+    isIdle: () => idle,
     getSystemPromptOptions: () => baseOptions,
   } as unknown as ExtensionCommandContext;
 
@@ -90,9 +107,24 @@ function setup(
     }
   }
 
+  async function emitContext(messages: any[]): Promise<any[] | undefined> {
+    for (const handler of eventHandlers.get("context_with_system") ?? []) {
+      const result = await handler({ type: "context_with_system", messages }, ctx);
+      if (result?.messages) return result.messages;
+    }
+    return undefined;
+  }
+
   return {
     baseOptions,
     notifications,
+    statuses,
+    setIdle(value: boolean) {
+      idle = value;
+    },
+    tick: () => tick?.(),
+    hasTimer: () => tick !== undefined,
+    emitContext,
     rebrief: () => commandHandler("", ctx),
     runTurn,
     emitSessionStart,
@@ -226,4 +258,65 @@ test("describeChanges shortens paths outside cwd and caps the list", () => {
   const a = { path: "/repo/a.md", content: "a" };
   const b = { path: "/repo/b.md", content: "b" };
   assert.equal(describeChanges([a, b], [b, a], "/repo", "/home/me"), "order changed");
+});
+
+test("status bar warns when context files change on disk and clears after rebrief", async () => {
+  const initial = [{ path: "/repo/AGENTS.md", content: "v1" }];
+  const disk = { current: initial.map((f) => ({ ...f })) };
+  const h = setup(initial, disk);
+  await h.emitSessionStart();
+
+  h.tick();
+  assert.deepEqual(h.statuses, []);
+
+  disk.current = [{ path: "/repo/AGENTS.md", content: "v2" }];
+  h.tick();
+  h.tick();
+  assert.deepEqual(h.statuses, ["● context files changed — /rebrief"]);
+
+  await h.rebrief();
+  h.tick();
+  assert.deepEqual(h.statuses, ["● context files changed — /rebrief", undefined]);
+});
+
+test("no polling when Pi was started with --no-context-files", async () => {
+  const h = setup([], { current: [] }, { contextFilesDisabled: () => true });
+  await h.emitSessionStart();
+  assert.equal(h.hasTimer(), false);
+});
+
+test("rebrief during a run updates the running turn until the next run starts", async () => {
+  const initial = [{ path: "/repo/AGENTS.md", content: "v1" }];
+  const disk = { current: [{ path: "/repo/AGENTS.md", content: "v2" }] };
+  const h = setup(initial, disk);
+  const transcript = [
+    { role: "system", content: "", sections: { project_context: renderProjectContext(initial) }, timestamp: 1 },
+    { role: "user", content: "go", timestamp: 2 },
+  ];
+  assert.equal(await h.emitContext(transcript), undefined);
+
+  h.setIdle(false);
+  await h.rebrief();
+  assert.equal(h.notifications[0]?.message, "Reloaded context files: changed AGENTS.md — applies to the running turn.");
+
+  const next = [...transcript, { role: "assistant", content: [], timestamp: 3 }];
+  const sent = await h.emitContext(next);
+  assert.equal(sent?.length, 4);
+  assert.equal(sent?.[3].role, "system");
+  assert.deepEqual(sent?.[3].sections, { project_context: renderProjectContext(disk.current) });
+
+  // Later requests keep the update at the same place
+  const later = await h.emitContext([...next, { role: "toolResult", content: [], timestamp: 4 }]);
+  assert.equal(later?.[3].role, "system");
+  assert.equal(later?.length, 5);
+
+  await h.runTurn();
+  assert.equal(await h.emitContext(next), undefined);
+});
+
+test("withContextUpdate leaves a transcript that already has the files alone", () => {
+  const files = [{ path: "/repo/AGENTS.md", content: "v1" }];
+  const messages = [{ role: "system", content: "", sections: { project_context: renderProjectContext(files) }, timestamp: 1 }];
+  assert.equal(withContextUpdate(messages as any, files, 1, 9), undefined);
+  assert.equal(renderProjectContext([]), null);
 });
