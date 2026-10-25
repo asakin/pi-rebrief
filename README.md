@@ -9,9 +9,9 @@ which files have changed.
 It also flags in the status bar when those files change on disk, for example after a `git pull`
 or a branch switch.
 
-Think of it as a lighter companion to Pi's `/reload`: `/reload` refreshes the whole session
-(settings, extensions, MCP servers, skills, themes and context files), while `/rebrief`
-refreshes only the context files, so it's safe to run while the agent is working.
+`/reload` refreshes the whole session: settings, extensions, MCP servers, skills, themes, and
+context files. `/rebrief` is for when only the context files changed, including while a turn
+is in progress.
 
 ## Install
 
@@ -23,8 +23,13 @@ Restart or `/reload` your session to use.
 
 ## Usage
 
-When a context file changes on disk, the status bar shows
-`● context files changed — /rebrief`. Nothing is reloaded until you run:
+When a context file changes on disk, the status bar says so:
+
+```text
+● pi-rebrief: AGENTS.md changed on disk since it was loaded. Run /rebrief to load the new version.
+```
+
+Nothing is reloaded until you run:
 
 ```text
 /rebrief
@@ -33,8 +38,12 @@ When a context file changes on disk, the status bar shows
 Your next message runs with the new instructions, and so does everything after it. `/rebrief` reports
 what it found, for example:
 
-- `Reloaded context files: changed AGENTS.md, added sub/AGENTS.md.`
-- `Context files unchanged (2 context files).`
+```text
+pi-rebrief: reloaded context files.
+  changed: AGENTS.md
+  added:   sub/AGENTS.md
+They apply from your next message.
+```
 
 If you run it while a turn is in progress, the rest of that turn will use the new
 instructions.

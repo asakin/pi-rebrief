@@ -9,6 +9,7 @@ import type {
 import {
   createRebriefExtension,
   describeChanges,
+  formatStaleStatus,
   renderProjectContext,
   type ContextFile,
 } from "./index.ts";
@@ -101,14 +102,17 @@ test("/rebrief between turns reloads context files for subsequent turns", async 
   // User edits AGENTS.md and runs /rebrief while the agent is idle.
   session.writeDisk(v2);
   await session.rebrief();
-  assert.equal(session.notices.at(-1), "Reloaded context files: changed AGENTS.md.");
+  assert.equal(
+    session.notices.at(-1),
+    "pi-rebrief: reloaded context files.\n  changed: AGENTS.md\nThey apply from your next message.",
+  );
 
   // The next turn builds its system prompt with the reloaded file.
   assert.deepEqual(await session.startTurn(), v2);
 
   // Running /rebrief again with no further edits reports that nothing changed.
   await session.rebrief();
-  assert.equal(session.notices.at(-1), "Context files unchanged (1 context file).");
+  assert.equal(session.notices.at(-1), "pi-rebrief: context files are unchanged (1 file). Nothing to reload.");
 });
 
 test("status bar flags when context files change on disk and clears after /rebrief", async () => {
@@ -123,7 +127,10 @@ test("status bar flags when context files change on disk and clears after /rebri
   // A file changes on disk (e.g. after git pull): the next poll shows the warning.
   session.writeDisk([{ path: "/repo/AGENTS.md", content: "v2" }]);
   session.pollDisk();
-  assert.equal(session.statusBar, "● context files changed — /rebrief");
+  assert.equal(
+    session.statusBar,
+    "● pi-rebrief: AGENTS.md changed on disk since it was loaded. Run /rebrief to load the new version.",
+  );
 
   // Running /rebrief reloads the file and clears the warning.
   await session.rebrief();
@@ -146,7 +153,10 @@ test("/rebrief mid-turn injects the new instructions into the running turn", asy
   // User edits AGENTS.md and runs /rebrief while the agent is working.
   session.writeDisk(v2);
   await session.rebrief();
-  assert.equal(session.notices.at(-1), "Reloaded context files: changed AGENTS.md — applies to the running turn.");
+  assert.equal(
+    session.notices.at(-1),
+    "pi-rebrief: reloaded context files.\n  changed: AGENTS.md\nThey apply to the current turn, starting with the agent's next step.",
+  );
 
   // Before the agent's next model call in this turn, a system section update with v2 is appended.
   const afterAssistantStep = [...turnStart, { role: "assistant", content: [], timestamp: 3 }];
@@ -175,24 +185,31 @@ test("with --no-context-files, nothing is watched and /rebrief does nothing", as
   // Editing a file and running /rebrief leaves the next turn untouched.
   session.writeDisk([{ path: "/repo/AGENTS.md", content: "v2" }]);
   await session.rebrief();
-  assert.equal(session.notices.at(-1), "Context files are disabled (--no-context-files) — nothing to rebrief.");
+  assert.equal(
+    session.notices.at(-1),
+    "pi-rebrief: Pi was started with --no-context-files, so there are no context files to reload.",
+  );
   assert.deepEqual(await session.startTurn(), v1);
 });
 
-test("describeChanges summarizes changed, added, and removed files with readable paths", () => {
+test("change summaries list files by kind with readable paths", () => {
+  const before = [
+    { path: "/repo/AGENTS.md", content: "v1" },
+    { path: "/repo/old/CLAUDE.md", content: "gone" },
+  ];
+  const after = [
+    { path: "/AGENTS.md", content: "root" },
+    { path: "/repo/AGENTS.md", content: "v2" },
+    { path: "/home/me/.pi/agent/AGENTS.md", content: "global" },
+  ];
+  // Parent folders read as ../, files under home as ~/, files in cwd as relative paths.
+  assert.deepEqual(describeChanges(before, after, "/repo/app", "/home/me"), [
+    "  changed: ../AGENTS.md",
+    "  added:   ../../AGENTS.md, ~/.pi/agent/AGENTS.md",
+    "  and 1 more",
+  ]);
   assert.equal(
-    describeChanges(
-      [
-        { path: "/repo/AGENTS.md", content: "v1" },
-        { path: "/repo/old/CLAUDE.md", content: "gone" },
-      ],
-      [
-        { path: "/repo/AGENTS.md", content: "v2" },
-        { path: "/home/me/.pi/agent/AGENTS.md", content: "global" },
-      ],
-      "/repo",
-      "/home/me",
-    ),
-    "changed AGENTS.md, added ~/.pi/agent/AGENTS.md, removed old/CLAUDE.md",
+    formatStaleStatus(before, after, "/repo", "/home/me"),
+    "● pi-rebrief: 4 context files changed on disk since they were loaded (AGENTS.md, ../AGENTS.md, ~/.pi/agent/AGENTS.md, and 1 more). Run /rebrief to load them.",
   );
 });

@@ -5,9 +5,9 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import { getAgentDir, loadProjectContextFiles } from "@earendil-works/pi-coding-agent";
 import { getCurrentSystemMessage } from "@earendil-works/pi-ai";
-import { formatReloadedNotice, formatUnchangedNotice } from "./format.ts";
+import { formatDisabledNotice, formatReloadedNotice, formatStaleStatus, formatUnchangedNotice } from "./format.ts";
 
-export { describeChanges } from "./format.ts";
+export { describeChanges, formatStaleStatus } from "./format.ts";
 
 export interface ContextFile {
   path: string;
@@ -75,8 +75,8 @@ export function createRebriefExtension(deps: RebriefDeps = {}) {
 
     const load = (cwd: string) => loadContextFiles({ cwd, agentDir: getAgentDir() });
 
-    const showStatus = (ui: ExtensionUIContext | undefined, stale: boolean) => {
-      const next = stale ? `${ui?.theme.fg("warning", "●")} context files changed — /rebrief` : undefined;
+    const showStatus = (ui: ExtensionUIContext | undefined, text: string | undefined) => {
+      const next = text === undefined ? undefined : ui?.theme.fg("warning", text);
       if (!ui || next === status) {
         return;
       }
@@ -95,7 +95,10 @@ export function createRebriefExtension(deps: RebriefDeps = {}) {
       }
       const ui = ctx.hasUI ? ctx.ui : undefined;
       files = load(ctx.cwd);
-      stopTimer = startTimer(() => showStatus(ui, !sameContextFiles(files, load(ctx.cwd))), POLL_MS);
+      stopTimer = startTimer(() => {
+        const onDisk = load(ctx.cwd);
+        showStatus(ui, sameContextFiles(files, onDisk) ? undefined : formatStaleStatus(files, onDisk, ctx.cwd));
+      }, POLL_MS);
     });
 
     pi.on("session_shutdown", () => {
@@ -113,7 +116,7 @@ export function createRebriefExtension(deps: RebriefDeps = {}) {
         };
 
         if (contextFilesDisabled()) {
-          notify("Context files are disabled (--no-context-files) — nothing to rebrief.", "warning");
+          notify(formatDisabledNotice(), "warning");
           return;
         }
 
@@ -126,7 +129,7 @@ export function createRebriefExtension(deps: RebriefDeps = {}) {
           pending = { at: Date.now() };
         }
 
-        showStatus(ctx.hasUI ? ctx.ui : undefined, false);
+        showStatus(ctx.hasUI ? ctx.ui : undefined, undefined);
 
         if (!changed) {
           notify(formatUnchangedNotice(files.length), "info");
