@@ -1,6 +1,6 @@
 {
   "name": "pi-rebrief",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "type": "module",
   "description": "Reload only the project context files, including AGENTS.md and CLAUDE.md, into a running Pi session: no extension restart or MCP reconnect like /reload, plus a report of what changed.",
   "keywords": [
