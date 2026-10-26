@@ -160,7 +160,7 @@ export function createRebriefExtension(deps: RebriefDeps = {}) {
       }
       pending.anchor ??= messages.at(-1)?.timestamp;
       const update = { role: "system" as const, content: "", sections: { project_context: desired }, timestamp: pending.at };
-      const anchor = messages.findIndex((m) => m.timestamp === pending!.anchor);
+      const anchor = messages.findLastIndex((m) => m.timestamp === pending!.anchor);
       const at = anchor === -1 ? messages.length : anchor + 1;
       return { messages: [...messages.slice(0, at), update, ...messages.slice(at)] };
     });

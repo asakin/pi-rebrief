@@ -158,22 +158,28 @@ test("/rebrief mid-turn injects the new instructions into the running turn", asy
     "pi-rebrief: reloaded context files.\n  changed: AGENTS.md\nThey apply to the current turn, starting with the agent's next step.",
   );
 
-  // Before the agent's next model call in this turn, a system section update with v2 is appended.
-  const afterAssistantStep = [...turnStart, { role: "assistant", content: [], timestamp: 3 }];
-  const requestMessages = session.prepareRequest(afterAssistantStep);
+  // Before the agent's next model call in this turn (e.g. after parallel tool results created in the
+  // same millisecond), a system section update with v2 is appended after the last message.
+  const afterToolBatch = [
+    ...turnStart,
+    { role: "assistant", content: [], timestamp: 3 },
+    { role: "toolResult", content: [], timestamp: 4 },
+    { role: "toolResult", content: [], timestamp: 4 },
+  ];
+  const requestMessages = session.prepareRequest(afterToolBatch);
   assert.deepEqual(requestMessages?.at(-1)?.sections, { project_context: renderProjectContext(v2) });
 
   // Later requests in the same turn keep the update where it was first inserted, not at the end,
   // so it reads as happening at that point and the cached prefix stays the same.
-  const afterToolResult = [...afterAssistantStep, { role: "toolResult", content: [], timestamp: 4 }];
-  const laterRequest = session.prepareRequest(afterToolResult);
-  assert.equal(laterRequest?.length, 5);
-  assert.deepEqual(laterRequest?.[3]?.sections, { project_context: renderProjectContext(v2) });
-  assert.equal(laterRequest?.at(-1)?.role, "toolResult");
+  const afterNextStep = [...afterToolBatch, { role: "assistant", content: [], timestamp: 5 }];
+  const laterRequest = session.prepareRequest(afterNextStep);
+  assert.equal(laterRequest?.length, 7);
+  assert.deepEqual(laterRequest?.[5]?.sections, { project_context: renderProjectContext(v2) });
+  assert.equal(laterRequest?.at(-1)?.role, "assistant");
 
   // Once the next turn starts, its own system prompt has v2, so per-request injection stops.
   await session.startTurn();
-  assert.equal(session.prepareRequest(afterAssistantStep), undefined);
+  assert.equal(session.prepareRequest(afterToolBatch), undefined);
 });
 
 test("with --no-context-files, nothing is watched and /rebrief does nothing", async () => {
